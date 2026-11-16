@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v6)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v8)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -172,7 +172,82 @@
 
 ---
 
-## Этап 5. Создание и настройка виртуальной машины Ubuntu Server
+## Этап 5. Настройка единого локального центра сертификации (Root CA) и доверенного HTTPS для Proxmox и TrueNAS
+
+По умолчанию Proxmox VE и TrueNAS используют самоподписанные SSL-сертификаты (в TrueNAS 24.10+ сертификат по умолчанию выпущен на имя `localhost`, а встроенное создание CA удалено). Из-за этого браузеры выдают предупреждение `Your connection is not private`.
+
+Чтобы убрать предупреждения навсегда для обоих серверов, создадим **единый локальный Центр Сертификации (`homeCA`)** прямо в консоли Proxmox, выпустим от его имени сертификаты с корректными полями SAN для **Proxmox** и **TrueNAS**, и добавим корневой сертификат в доверенные на ПК.
+
+1. **Сгенерируйте корневой сертификат (Root CA) и сертификаты серверов в консоли Proxmox (`ocean` -> `Shell`):**
+   ```bash
+   mkdir -p /root/certs && cd /root/certs
+
+   # 1. Создание корневого центра сертификации (Root CA) сроком на 10 лет
+   openssl genrsa -out homeCA.key 2048
+   openssl req -x509 -new -nodes -key homeCA.key -sha256 -days 3650 -subj "/CN=HomeLab Root CA" -out homeCA.crt
+
+   # 2. Выпуск сертификата для Proxmox VE (ocean.home.arpa и 192.168.89.201)
+   openssl genrsa -out pve.key 2048
+   openssl req -new -key pve.key -subj "/CN=ocean.home.arpa" -out pve.csr
+   cat <<EOF > pve.ext
+   authorityKeyIdentifier=keyid,issuer
+   basicConstraints=CA:FALSE
+   keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+   subjectAltName = @alt_names
+
+   [alt_names]
+   DNS.1 = ocean.home.arpa
+   IP.1 = 192.168.89.201
+   EOF
+   openssl x509 -req -in pve.csr -CA homeCA.crt -CAkey homeCA.key -CAcreateserial -out pve.crt -days 3650 -sha256 -extfile pve.ext
+
+   # 3. Выпуск сертификата для TrueNAS (truenas.ocean.home.arpa и 192.168.89.202)
+   openssl genrsa -out truenas.key 2048
+   openssl req -new -key truenas.key -subj "/CN=truenas.ocean.home.arpa" -out truenas.csr
+   cat <<EOF > truenas.ext
+   authorityKeyIdentifier=keyid,issuer
+   basicConstraints=CA:FALSE
+   keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+   subjectAltName = @alt_names
+
+   [alt_names]
+   DNS.1 = truenas.ocean.home.arpa
+   IP.1 = 192.168.89.202
+   EOF
+   openssl x509 -req -in truenas.csr -CA homeCA.crt -CAkey homeCA.key -CAcreateserial -out truenas.crt -days 3650 -sha256 -extfile truenas.ext
+   ```
+   *(Сохраните папку `/root/certs` — если в будущем развернёте новые локальные сервисы, вы сможете подписать для них сертификаты этим же ключом `homeCA.key`, не добавляя новых корневых сертификатов на компьютеры).*
+
+2. **Установите новый SSL-сертификат в Proxmox VE:**
+   В консоли `ocean` -> `Shell` скопируйте сертификат и ключ в рабочую директорию узла (перезаписав старые файлы `pveproxy-ssl.*`) и перезапустите веб-интерфейс:
+   ```bash
+   cp /root/certs/pve.crt /etc/pve/nodes/ocean/pveproxy-ssl.pem
+   cp /root/certs/pve.key /etc/pve/nodes/ocean/pveproxy-ssl.key
+   systemctl restart pveproxy.service
+   ```
+   *(Примечание: В отличие от `pve-ssl.pem`, файлы `pveproxy-ssl.pem` и `pveproxy-ssl.key` предназначены именно для пользовательских сертификатов и не перезаписываются при обновлении кластера или самого Proxmox).*
+
+3. **Импортируйте и активируйте SSL-сертификат в TrueNAS:**
+   * Выведите содержимое сертификата и приватного ключа TrueNAS в консоли Proxmox:
+     ```bash
+     cat /root/certs/truenas.crt
+     cat /root/certs/truenas.key
+     ```
+   * Откройте веб-интерфейс TrueNAS -> **Credentials** -> **Certificates** -> в блоке **Certificates** нажмите **Add**.
+   * Задайте **Name:** `truenas-local`, выберите **Type:** `Import Certificate` -> **Next**.
+   * Вставьте содержимое `truenas.crt` в поле **Certificate**, а содержимое `truenas.key` в поле **Private Key** (включая строки `-----BEGIN ...-----` и `-----END ...-----`). Нажмите **Next** -> **Save**.
+   * Перейдите в **System** -> **General Settings** -> блок **GUI** -> **Settings**, выберите в поле **GUI SSL Certificate** новый сертификат `truenas-local` и нажмите **Save**.
+
+4. **Установите корневой сертификат `homeCA.crt` в доверенные на ПК (Windows):**
+   * Выведите содержимое `homeCA.crt` в консоли Proxmox (`cat /root/certs/homeCA.crt`), скопируйте его и сохраните на рабочем столе ПК в файл `homeCA.crt`.
+   * Дважды кликните по файлу `homeCA.crt` -> нажмите **Установить сертификат...** (*Install Certificate*).
+   * Выберите **Локальный компьютер** (*Local Machine*) -> **Далее**.
+   * Выберите **Поместить все сертификаты в следующее хранилище** -> **Обзор** -> **Доверенные корневые центры сертификации** (*Trusted Root Certification Authorities*) -> **ОК** -> **Готово**.
+   * Полностью перезапустите браузер. Теперь адреса `https://ocean.home.arpa:8006`, `https://192.168.89.201:8006`, `https://truenas.ocean.home.arpa` и `https://192.168.89.202` будут открываться с доверенным HTTPS-соединением без предупреждений.
+
+---
+
+## Этап 6. Создание и настройка виртуальной машины Ubuntu Server
 
 1. **Нажмите `Create VM`** в Proxmox.
 2. **Вкладка General:** *Node:* `ocean`, *VM ID:* `101`, *Name:* `ubuntu-docker`, включите **Start at boot** и задайте *Start/Shutdown order* = `2` (чтобы Ubuntu стартовала после поднятия хранилища TrueNAS).
@@ -189,7 +264,7 @@
 
 ---
 
-## Этап 6. Подключение папок NAS и запуск связки VPN + qBittorrent в Ubuntu
+## Этап 7. Подключение папок NAS и запуск связки VPN + qBittorrent в Ubuntu
 
 Выполните команды в терминале Ubuntu:
 
@@ -274,7 +349,7 @@
 
 ---
 
-## Этап 7. Подключение ИБП CyberPower CP900EPFCLCD
+## Этап 8. Подключение ИБП CyberPower CP900EPFCLCD
 
 1. Подключите комплектный USB-кабель от ИБП в USB-порт материнской платы.
 2. В консоли Proxmox (`ocean` -> `Shell`) установите службу мониторинга ИБП:
