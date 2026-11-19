@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v8)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v9)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -249,7 +249,7 @@
 
 ## Этап 6. Создание и настройка виртуальной машины Ubuntu Server
 
-1. **Нажмите `Create VM`** в Proxmox.
+1. **Нажмите `Create VM`** в правом верхнем углу Proxmox.
 2. **Вкладка General:** *Node:* `ocean`, *VM ID:* `101`, *Name:* `ubuntu-docker`, включите **Start at boot** и задайте *Start/Shutdown order* = `2` (чтобы Ubuntu стартовала после поднятия хранилища TrueNAS).
 3. **Вкладка OS:** Выберите ISO-образ **Ubuntu Server 24.04**.
 4. **Вкладка System:** Оставьте по умолчанию (`i440fx`, `Default (SeaBIOS)`), включите **QEMU Agent**.
@@ -349,18 +349,194 @@
 
 ---
 
-## Этап 8. Подключение ИБП CyberPower CP900EPFCLCD
+## Этап 8. Подключение ИБП CyberPower CP900EPFCLCD в режиме Master / Slave
 
-1. Подключите комплектный USB-кабель от ИБП в USB-порт материнской платы.
-2. В консоли Proxmox (`ocean` -> `Shell`) установите службу мониторинга ИБП:
+В данной схеме хост **Proxmox VE** выступает главным сервером (**Master / Netserver**), к которому по USB подключен ИБП, а виртуальные машины **TrueNAS** и **Ubuntu** работают как сетевые клиенты (**Slave**). При отключении электричества каждая система корректно завершает работу по собственному таймеру в строгом порядке: сначала останавливается **Ubuntu** (через 2 минуты), затем **TrueNAS** сбрасывает кэш ZFS и размонтирует диски (через 4 минуты), и последним выключается сам **Proxmox** (по достижении низкого заряда батареи).
+
+### Шаг 1. Настройка NUT-сервера (Master) на хосте Proxmox VE
+
+1. **Подключите комплектный USB-кабель** от ИБП CyberPower CP900EPFCLCD в свободный USB-порт материнской платы и убедитесь, что система видит устройство:
    ```bash
-   apt update && apt install -y nut
+   lsusb | grep -i cyber
    ```
-3. В файле `/etc/nut/nut.conf` задайте режим `MODE=standalone`, а в `/etc/nut/ups.conf` добавьте секцию для CyberPower:
-   ```ini
+   Вы увидите строку вида `Bus 001 Device 003: ID 0764:0501 Cyber Power System, Inc. CP1500 AVR UPS`.
+
+2. **Установите пакеты NUT в консоли Proxmox (`ocean` -> `Shell`):**
+   ```bash
+   apt update && apt install -y nut nut-client nut-server
+   ```
+
+3. **Включите режим сетевого сервера в `/etc/nut/nut.conf`:**
+   ```bash
+   echo "MODE=netserver" > /etc/nut/nut.conf
+   ```
+
+4. **Добавьте описание ИБП в `/etc/nut/ups.conf`:**
+   ```bash
+   cat << 'EOF' > /etc/nut/ups.conf
+   pollinterval = 15
+
    [cyberpower]
        driver = usbhid-ups
        port = auto
        desc = "CyberPower CP900EPFCLCD"
+       override.battery.charge.low = 30
+       override.battery.runtime.low = 300
+   EOF
    ```
-4. Перезапустите службы (`systemctl restart nut-server nut-monitor`). При длительном отключении электричества Proxmox автоматически корректно завершит работу обеих виртуальных машин (сначала Ubuntu, затем TrueNAS) и выключится сам.
+   *(Параметр `pollinterval = 15` предотвращает спам в системный журнал о кратковременных задержках опроса USB у моделей CyberPower, а `override.battery.charge.low = 30` задает порог в 30% заряда для принудительного выключения самого гипервизора).*
+
+5. **Разрешите сетевые подключения к серверу NUT в `/etc/nut/upsd.conf`:**
+   ```bash
+   cat << 'EOF' > /etc/nut/upsd.conf
+   LISTEN 127.0.0.1 3493
+   LISTEN 192.168.89.201 3493
+   EOF
+   ```
+
+6. **Создайте учетные записи для локального и сетевого мониторинга в `/etc/nut/upsd.users`:**
+   Замените `ПАРОЛЬ_ADMIN` и `ПАРОЛЬ_SLAVE` на надежные пароли без спецсимволов `#` и кавычек:
+   ```bash
+   cat << 'EOF' > /etc/nut/upsd.users
+   [upsadmin]
+       password = ПАРОЛЬ_ADMIN
+       actions = SET
+       actions = FSD
+       instcmds = ALL
+       upsmon primary
+
+   [upsslave]
+       password = ПАРОЛЬ_SLAVE
+       upsmon secondary
+   EOF
+   ```
+
+7. **Настройте локальный монитор `upsmon` на самом Proxmox в `/etc/nut/upsmon.conf`:**
+   ```bash
+   cat << 'EOF' > /etc/nut/upsmon.conf
+   MONITOR cyberpower@localhost 1 upsadmin ПАРОЛЬ_ADMIN primary
+   MINSUPPLIES 1
+   SHUTDOWNCMD "/sbin/shutdown -h +0"
+   POLLFREQ 5
+   POLLFREQALERT 5
+   HOSTSYNC 15
+   DEADTIME 25
+   POWERDOWNFLAG /etc/killpower
+   RBWARNTIME 43200
+   NOCOMMWARNTIME 300
+   FINALDELAY 5
+   EOF
+   ```
+
+8. **Ограничьте права доступа к конфигурационным файлам с паролями и перезапустите службы:**
+   ```bash
+   chown root:nut /etc/nut/*
+   chmod 640 /etc/nut/*
+   systemctl restart nut-driver.target nut-server nut-monitor
+   systemctl enable nut-server nut-monitor
+   ```
+
+9. **Проверьте работу ИБП:**
+   ```bash
+   upsc cyberpower@localhost
+   ```
+   В выводе должны отобразиться параметры батареи (`battery.charge`, `battery.runtime`, `ups.status: OL`).
+
+---
+
+### Шаг 2. Настройка клиента (Slave) в TrueNAS
+
+1. **Проверьте сетевую доступность NUT-сервера из консоли TrueNAS.** Откройте в веб-интерфейсе TrueNAS **System** -> **Shell** и выполните:
+   ```bash
+   upsc cyberpower@192.168.89.201
+   ```
+   Если вывод возвращает данные о состоянии ИБП, сетевой доступ работает корректно.
+
+2. **Настройте службу UPS в веб-интерфейсе TrueNAS:**
+   * Перейдите в **System** -> **Services**, найдите службу **UPS** и нажмите на иконку карандаша (**Edit**).
+   * **UPS Mode:** выберите `Slave`.
+   * **Identifier:** введите `cyberpower` (имя должно строго совпадать с именем секции в `[cyberpower]` на Proxmox).
+   * **Remote Host:** укажите IP-адрес Proxmox `192.168.89.201`.
+   * **Remote Port:** `3493`.
+   * **Monitor User:** введите `upsslave`.
+   * **Monitor Password:** укажите ваш `ПАРОЛЬ_SLAVE`.
+   * **Shutdown Mode:** выберите `UPS goes on battery` (выключение по таймеру после перехода на батарею).
+   * **Shutdown Timer:** укажите `240` (система начнет корректное завершение работы через 4 минуты после отключения электричества, если питание не восстановится).
+   * **Shutdown Command:** оставьте по умолчанию (`/sbin/shutdown -P now` или `midclt call system.shutdown`).
+   * **Power Off UPS:** снимите галочку (отключать питание розеток ИБП должен только Master-хост Proxmox в самом конце).
+   * Нажмите **Save**.
+
+3. **Запустите службу UPS:**
+   * В списке **System** -> **Services** переведите переключатель напротив **UPS** в положение **Running** и поставьте галочку **Start Automatically**.
+   * Теперь в разделе **Reporting** -> **UPS** начнет собираться статистика заряда батареи, нагрузки и напряжения.
+
+---
+
+### Шаг 3. Настройка клиента (Slave) в Ubuntu Server (опционально)
+
+Чтобы виртуальная машина с Docker-контейнерами и сетевыми дисками NFS выключалась самой первой (через 2 минуты после пропажи сети), установите клиент NUT в Ubuntu:
+
+1. **Подключитесь к Ubuntu по SSH и установите `nut-client`:**
+   ```bash
+   sudo apt update && sudo apt install -y nut-client
+   ```
+
+2. **Задайте режим клиента в `/etc/nut/nut.conf`:**
+   ```bash
+   echo "MODE=netclient" | sudo tee /etc/nut/nut.conf
+   ```
+
+3. **Настройте подключение к Proxmox и таймер выключения в `/etc/nut/upsmon.conf`:**
+   ```bash
+   sudo tee /etc/nut/upsmon.conf > /dev/null << 'EOF'
+   MONITOR cyberpower@192.168.89.201 1 upsslave ПАРОЛЬ_SLAVE secondary
+   MINSUPPLIES 1
+   SHUTDOWNCMD "/sbin/shutdown -h +0"
+   NOTIFYCMD /usr/sbin/upssched
+   POLLFREQ 5
+   POLLFREQALERT 5
+   HOSTSYNC 15
+   DEADTIME 25
+   NOTIFYFLAG ONBATT SYSLOG+WALL+EXEC
+   NOTIFYFLAG ONLINE SYSLOG+WALL+EXEC
+   EOF
+   ```
+
+4. **Настройте таймер отключения через 120 секунд работы от батареи в `/etc/nut/upssched.conf`:**
+   ```bash
+   sudo mkdir -p /var/run/nut && sudo chown nut:nut /var/run/nut
+   sudo tee /etc/nut/upssched.conf > /dev/null << 'EOF'
+   CMDSCRIPT /bin/upssched-cmd
+   PIPEFN /var/run/nut/upssched.pipe
+   LOCKFN /var/run/nut/upssched.lock
+   AT ONBATT * START-TIMER earlyshutdown 120
+   AT ONLINE * CANCEL-TIMER earlyshutdown
+   EOF
+   ```
+
+5. **Создайте скрипт выполнения команды выключения `/bin/upssched-cmd`:**
+   ```bash
+   sudo tee /bin/upssched-cmd > /dev/null << 'EOF'
+   #!/bin/bash
+   case $1 in
+       earlyshutdown)
+           logger -t upssched-cmd "Отключение питания более 2 минут — выключаем Ubuntu Server"
+           /sbin/upsmon -c fsd
+           ;;
+   esac
+   EOF
+   sudo chmod +x /bin/upssched-cmd
+   ```
+
+6. **Перезапустите службу мониторинга в Ubuntu:**
+   ```bash
+   sudo chown root:nut /etc/nut/* && sudo chmod 640 /etc/nut/*
+   sudo systemctl restart nut-monitor
+   sudo systemctl enable nut-monitor
+   ```
+
+### Итоговый порядок действий при длительном отключении электричества
+1. **0:00** — Пропадает электричество, ИБП переходит на батарею (`OB`).
+2. **2:00** — Ubuntu Server корректно останавливает Docker-контейнеры, отмонтирует папку TrueNAS по NFS и выключается.
+3. **4:00** — TrueNAS останавливает службы, сбрасывает кэш ZFS на диски, экспортирует пул `tank` и выключается.
+4. **Заряд ИБП < 30% (или остаток < 5 минут)** — Proxmox VE отправляет команду на полное завершение работы, выключается сам и отключает подачу питания на розетки ИБП для сохранения остатка ресурса аккумулятора.
