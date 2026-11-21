@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v9)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v10)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -261,6 +261,37 @@
    ```bash
    ssh имя_пользователя@192.168.89.203
    ```
+
+10. **Настройте безопасность SSH (вход строго по ключу) и локального `root`:**
+    * **Скопируйте свой публичный SSH-ключ с ПК на сервер** (если ключа еще нет, создайте его на ПК командой `ssh-keygen -t ed25519`):
+      * *Linux / macOS:*
+        ```bash
+        ssh-copy-id имя_пользователя@192.168.89.203
+        ```
+      * *Windows (PowerShell):*
+        ```powershell
+        type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh имя_пользователя@192.168.89.203 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+        ```
+    * **Убедитесь, что вход по SSH-ключу работает** без запроса пароля (`ssh имя_пользователя@192.168.89.203`).
+    * **Активируйте учетную запись `root` для локального доступа** (через консоль Proxmox или `su -`), задав ей пароль:
+      ```bash
+      sudo passwd root
+      ```
+    * **Отключите вход по паролю и запретите вход `root` по SSH:**
+      ```bash
+      sudo tee /etc/ssh/sshd_config.d/00-ssh-hardening.conf > /dev/null << 'EOF'
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+      PermitRootLogin no
+      EOF
+      ```
+    * **Проверьте конфигурацию и перезапустите службу SSH:**
+      ```bash
+      sudo sshd -t && sudo systemctl restart ssh
+      ```
+      *(Примечание: после перезапуска службы подключение без SSH-ключа и любая попытка входа под `root` по сети будут отклоняться, при этом локальный вход под `root` через консоль Proxmox `101 (ubuntu-docker)` -> `Console` останется доступным).*
 
 ---
 
