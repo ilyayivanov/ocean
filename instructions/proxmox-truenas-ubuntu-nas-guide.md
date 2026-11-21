@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v13)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v14)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -310,14 +310,16 @@
    ```
    Перезайдите в SSH-сессию, чтобы применились права группы `docker`.
 
-2. **Настройте автоматическое монтирование сетевой папки TrueNAS:**
+2. **Настройте автоматическое монтирование сетевой папки TrueNAS по требованию (`automount`):**
    ```bash
    sudo mkdir -p /mnt/nas/media
-   echo "192.168.89.202:/mnt/tank/media /mnt/nas/media nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
+   echo "192.168.89.202:/mnt/tank/media /mnt/nas/media nfs defaults,_netdev,x-systemd.automount,x-systemd.idle-timeout=60 0 0" | sudo tee -a /etc/fstab
+   sudo systemctl daemon-reload
    sudo mount -a
    ```
    Убедитесь командой `df -h`, что папка `/mnt/nas/media` успешно примонтирована.
-   *(Примечание по правам доступа: убедитесь, что в TrueNAS и Ubuntu настроены пользователи с одинаковым числовым `UID` — по умолчанию `1000`, проверить в Ubuntu можно командой `id`. Все операции с файлами внутри `/mnt/nas/media` из терминала Ubuntu следует выполнять от этого обычного пользователя без `sudo`, так как для `root` на стороне TrueNAS действует защита Root Squash).*
+   *(Примечание 1: опция `x-systemd.automount` гарантирует, что если Ubuntu запустится быстрее, чем TrueNAS поднимет службу NFS — например, после кратковременного отключения света, — папка автоматически смонтируется при первом обращении к ней без ошибок при загрузке).*
+   *(Примечание 2: убедитесь, что в TrueNAS и Ubuntu настроены пользователи с одинаковым числовым `UID` — по умолчанию `1000`, проверить в Ubuntu можно командой `id`. Все операции с файлами внутри `/mnt/nas/media` из терминала Ubuntu следует выполнять от этого обычного пользователя без `sudo`, так как для `root` на стороне TrueNAS действует защита Root Squash).*
 
 3. **Подготовьте каталоги для Docker-контейнеров:**
    Создайте локальные каталоги для конфигурации и временного буфера на SSD, а также целевую папку на сетевом диске NAS (делайте это от обычного пользователя без `sudo`, иначе демон Docker при старте попытается создать папку от имени `root` и получит ошибку `permission denied` из-за защиты Root Squash на TrueNAS):
@@ -366,11 +368,13 @@
 
 ---
 
-## Этап 8. Подключение ИБП CyberPower CP900EPFCLCD в режиме Master / Slave
+## Этап 8. Подключение ИБП CyberPower CP900EPFCLCD в режиме Master / Slave и автозапуск ВМ при возврате питания
 
-В данной схеме хост **Proxmox VE** выступает главным сервером (**Master / Netserver**), к которому по USB подключен ИБП, а виртуальные машины **TrueNAS** и **Ubuntu** работают как сетевые клиенты (**Slave**). При отключении электричества каждая система корректно завершает работу по собственному таймеру в строгом порядке: сначала останавливается **Ubuntu** (через 2 минуты), затем **TrueNAS** сбрасывает кэш ZFS и размонтирует диски (через 4 минуты), и последним выключается сам **Proxmox** (по достижении низкого заряда батареи).
+В данной схеме хост **Proxmox VE** выступает главным сервером (**Master / Netserver**), к которому по USB подключен ИБП, а виртуальные машины **TrueNAS** и **Ubuntu** работают как сетевые клиенты (**Slave**). 
 
-### Шаг 1. Настройка NUT-сервера (Master) на хосте Proxmox VE
+При отключении электричества каждая система корректно завершает работу по собственному таймеру в строгом порядке: сначала останавливается **Ubuntu** (через 2 минуты), затем **TrueNAS** сбрасывает кэш ZFS и размонтирует диски (через 4 минуты), и последним выключается сам **Proxmox** (при снижении заряда батареи до 30%). Если электричество вернулось раньше, чем выключился Proxmox, гипервизор автоматически запустит остановленные виртуальные машины по событию возврата питания (`ONLINE`).
+
+### Шаг 1. Настройка NUT-сервера (Master) и автозапуска ВМ на хосте Proxmox VE
 
 1. **Подключите комплектный USB-кабель** от ИБП CyberPower CP900EPFCLCD в свободный USB-порт материнской платы и убедитесь, что система видит устройство:
    ```bash
@@ -378,9 +382,9 @@
    ```
    Вы увидите строку вида `Bus 001 Device 003: ID 0764:0501 Cyber Power System, Inc. CP1500 AVR UPS`.
 
-2. **Установите пакеты NUT в консоли Proxmox (`ocean` -> `Shell`):**
+2. **Установите пакеты NUT и `sudo` в консоли Proxmox (`ocean` -> `Shell`):**
    ```bash
-   apt update && apt install -y nut nut-client nut-server
+   apt update && apt install -y nut nut-client nut-server sudo
    ```
 
 3. **Включите режим сетевого сервера в `/etc/nut/nut.conf`:**
@@ -428,12 +432,13 @@
    EOF
    ```
 
-7. **Настройте локальный монитор `upsmon` на самом Proxmox в `/etc/nut/upsmon.conf`:**
+7. **Настройте локальный монитор `upsmon` в `/etc/nut/upsmon.conf` с отслеживанием возврата питания (`ONLINE`):**
    ```bash
    cat << 'EOF' > /etc/nut/upsmon.conf
    MONITOR cyberpower@localhost 1 upsadmin ПАРОЛЬ_ADMIN primary
    MINSUPPLIES 1
    SHUTDOWNCMD "/sbin/shutdown -h +0"
+   NOTIFYCMD /usr/sbin/upssched
    POLLFREQ 5
    POLLFREQALERT 5
    HOSTSYNC 15
@@ -442,22 +447,82 @@
    RBWARNTIME 43200
    NOCOMMWARNTIME 300
    FINALDELAY 5
+   NOTIFYFLAG ONLINE SYSLOG+WALL+EXEC
    EOF
    ```
 
-8. **Ограничьте права доступа к конфигурационным файлам с паролями и перезапустите службы:**
+8. **Настройте планировщик `upssched` и постоянную директорию `/var/run/nut`:**
    ```bash
-   chown root:nut /etc/nut/*
-   chmod 640 /etc/nut/*
-   systemctl restart nut-driver.target nut-server nut-monitor
-   systemctl enable nut-server nut-monitor
+   echo "d /var/run/nut 0755 nut nut -" > /etc/tmpfiles.d/nut-run.conf
+   systemd-tmpfiles --create
+
+   cat << 'EOF' > /etc/nut/upssched.conf
+   CMDSCRIPT /usr/local/bin/upssched-cmd
+   PIPEFN /var/run/nut/upssched.pipe
+   LOCKFN /var/run/nut/upssched.lock
+
+   AT ONLINE * EXECUTE power_restored
+   EOF
    ```
 
-9. **Проверьте работу ИБП:**
+9. **Разрешите пользователю `nut` запускать утилиту `qm` через `sudo` без пароля:**
    ```bash
-   upsc cyberpower@localhost
+   cat << 'EOF' > /etc/sudoers.d/nut-qm
+   nut ALL=(root) NOPASSWD: /usr/sbin/qm
+   EOF
+   chmod 0440 /etc/sudoers.d/nut-qm
+   visudo -cf /etc/sudoers.d/nut-qm
    ```
-   В выводе должны отобразиться параметры батареи (`battery.charge`, `battery.runtime`, `ups.status: OL`).
+   *(Убедитесь, что команда `visudo` вернула `/etc/sudoers.d/nut-qm: parsed OK`).*
+
+10. **Создайте скрипт `/usr/local/bin/upssched-cmd` для автоматического запуска ВМ при восстановлении питания:**
+    ```bash
+    cat << 'EOF' > /usr/local/bin/upssched-cmd
+    #!/bin/bash
+    case $1 in
+        power_restored)
+            logger -t upssched-cmd "Питание от сети восстановлено. Проверяем и запускаем ВМ..."
+            sleep 10
+            
+            if sudo /usr/sbin/qm status 100 | grep -q "stopped"; then
+                logger -t upssched-cmd "Запуск TrueNAS (VM 100)..."
+                /usr/bin/script -q -c "sudo /usr/sbin/qm start 100" /dev/null 2>&1 | logger -t upssched-cmd
+            else
+                logger -t upssched-cmd "VM 100 не в статусе stopped (текущий: $(sudo /usr/sbin/qm status 100))"
+            fi
+            
+            sleep 30
+            
+            if sudo /usr/sbin/qm status 101 | grep -q "stopped"; then
+                logger -t upssched-cmd "Запуск Ubuntu (VM 101)..."
+                /usr/bin/script -q -c "sudo /usr/sbin/qm start 101" /dev/null 2>&1 | logger -t upssched-cmd
+            else
+                logger -t upssched-cmd "VM 101 не в статусе stopped (текущий: $(sudo /usr/sbin/qm status 101))"
+            fi
+            ;;
+    esac
+    EOF
+    chmod +x /usr/local/bin/upssched-cmd
+    ```
+    *(Примечание: обертка `/usr/bin/script -q -c "..." /dev/null` создает виртуальный псевдотерминал (PTY), который требуется команде `qm start` при запуске из фонового демона, чтобы избежать ошибки `failed to tcsetpgrp: Inappropriate ioctl for device`).*
+
+11. **Ограничьте права доступа к конфигурационным файлам с паролями и перезапустите службы:**
+    ```bash
+    chown root:nut /etc/nut/*
+    chmod 640 /etc/nut/*
+    systemctl restart nut-driver.target nut-server nut-monitor
+    systemctl enable nut-server nut-monitor
+    ```
+
+12. **Проверьте работу ИБП и тестовый запуск скрипта:**
+    ```bash
+    upsc cyberpower@localhost
+    ```
+    В выводе должны отобразиться параметры батареи (`battery.charge`, `battery.runtime`, `ups.status: OL`). Проверить скрипт автозапуска ВМ можно командой (в условиях отсутствия терминала, аналогично демону):
+    ```bash
+    su -s /bin/bash nut -c "/usr/local/bin/upssched-cmd power_restored" < /dev/null
+    journalctl -t upssched-cmd -n 10 --no-pager
+    ```
 
 ---
 
@@ -489,7 +554,7 @@
 
 ---
 
-### Шаг 3. Настройка клиента (Slave) в Ubuntu Server (опционально)
+### Шаг 3. Настройка клиента (Slave) в Ubuntu Server
 
 Чтобы виртуальная машина с Docker-контейнерами и сетевыми дисками NFS выключалась самой первой (через 2 минуты после пропажи сети), установите клиент NUT в Ubuntu:
 
@@ -521,7 +586,9 @@
 
 4. **Настройте таймер отключения через 120 секунд работы от батареи в `/etc/nut/upssched.conf`:**
    ```bash
-   sudo mkdir -p /var/run/nut && sudo chown nut:nut /var/run/nut
+   echo "d /var/run/nut 0755 nut nut -" | sudo tee /etc/tmpfiles.d/nut-run.conf
+   sudo systemd-tmpfiles --create
+
    sudo tee /etc/nut/upssched.conf > /dev/null << 'EOF'
    CMDSCRIPT /bin/upssched-cmd
    PIPEFN /var/run/nut/upssched.pipe
@@ -552,8 +619,12 @@
    sudo systemctl enable nut-monitor
    ```
 
-### Итоговый порядок действий при длительном отключении электричества
+---
+
+### Итоговый порядок действий при отключении и возврате электричества
+
 1. **0:00** — Пропадает электричество, ИБП переходит на батарею (`OB`).
 2. **2:00** — Ubuntu Server корректно останавливает Docker-контейнеры, отмонтирует папку TrueNAS по NFS и выключается.
 3. **4:00** — TrueNAS останавливает службы, сбрасывает кэш ZFS на диски, экспортирует пул `tank` и выключается.
-4. **Заряд ИБП < 30% (или остаток < 5 минут)** — Proxmox VE отправляет команду на полное завершение работы, выключается сам и отключает подачу питания на розетки ИБП для сохранения остатка ресурса аккумулятора.
+4. **Сценарий А (электричество вернулось до разряда ИБП до 30%):** Proxmox VE фиксирует переход на сеть (`ONLINE`), выдерживает паузу 10 секунд, запускает TrueNAS (`VM 100`), ждет 30 секунд и запускает Ubuntu (`VM 101`). Ubuntu автоматически монтирует NFS при обращении Docker-контейнеров.
+5. **Сценарий Б (длительное отключение, заряд ИБП < 30% или остаток < 5 минут):** Proxmox VE отправляет команду на полное завершение работы, выключается сам и отключает подачу питания на розетки ИБП. После восстановления электропитания BIOS материнской платы (`AC BACK: Always On`) автоматически включает сервер, Proxmox загружается и запускает ВМ согласно порядку `Start/Shutdown order` (`1` -> `2`).
