@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v11)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v13)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -15,7 +15,7 @@
 
 1. **Proxmox VE** устанавливается на быстрый NVMe SSD (Kingston KC3000).
 2. **Виртуальная машина №1 (TrueNAS Community Edition / SCALE):** выделяется 4 ядра CPU и 16 ГБ ОЗУ. Встроенный SATA-контроллер материнской платы пробрасывается напрямую в эту ВМ (PCI Passthrough), благодаря чему ZFS работает с жесткими дисками напрямую без посредников.
-3. **Виртуальная машина №2 (Ubuntu Server 24.04 LTS):** выделяется 4 ядра CPU, 8 ГБ ОЗУ и 64 ГБ на SSD. Здесь работают Docker-контейнеры (изолированная связка `Gluetun + qBittorrent` для скачивания торрентов строго через VPN) и сервисы маршрутизации.
+3. **Виртуальная машина №2 (Ubuntu Server 24.04 LTS):** выделяется 4 ядра CPU, 8 ГБ ОЗУ и 64 ГБ на SSD. Здесь работают Docker-контейнеры (включая `qBittorrent` для загрузки файлов) и сервисы маршрутизации.
 4. **Взаимодействие между ВМ:** Ubuntu монтирует сетевую папку из TrueNAS по протоколу NFS через внутренний виртуальный коммутатор Proxmox на скорости 10–40 Гбит/с.
 
 ---
@@ -297,7 +297,7 @@
 
 ---
 
-## Этап 7. Подключение папок NAS и запуск связки VPN + qBittorrent в Ubuntu
+## Этап 7. Подключение папок NAS и запуск qBittorrent в Ubuntu
 
 Выполните команды в терминале Ubuntu:
 
@@ -320,8 +320,9 @@
    *(Примечание по правам доступа: убедитесь, что в TrueNAS и Ubuntu настроены пользователи с одинаковым числовым `UID` — по умолчанию `1000`, проверить в Ubuntu можно командой `id`. Все операции с файлами внутри `/mnt/nas/media` из терминала Ubuntu следует выполнять от этого обычного пользователя без `sudo`, так как для `root` на стороне TrueNAS действует защита Root Squash).*
 
 3. **Подготовьте каталоги для Docker-контейнеров:**
+   Создайте локальные каталоги для конфигурации и временного буфера на SSD, а также целевую папку на сетевом диске NAS (делайте это от обычного пользователя без `sudo`, иначе демон Docker при старте попытается создать папку от имени `root` и получит ошибку `permission denied` из-за защиты Root Squash на TrueNAS):
    ```bash
-   mkdir -p ~/docker/torrents/temp ~/docker/gluetun ~/docker/qbittorrent
+   mkdir -p ~/docker/torrents/temp ~/docker/qbittorrent /mnt/nas/media/downloads
    cd ~/docker
    ```
 
@@ -329,48 +330,30 @@
    ```bash
    nano docker-compose.yml
    ```
-   Вставьте конфигурацию (весь трафик `qbittorrent` направляется строго через сетевой интерфейс контейнера `gluetun` со встроенным Kill Switch):
+   Вставьте конфигурацию для запуска `qBittorrent`:
    ```yaml
    services:
-     gluetun:
-       image: qmcgaw/gluetun:latest
-       container_name: gluetun
-       cap_add:
-         - NET_ADMIN
-       devices:
-         - /dev/net/tun:/dev/net/tun
-       ports:
-         - 8080:8080 # Веб-интерфейс qBittorrent
-       environment:
-         - VPN_SERVICE_PROVIDER=custom
-         - VPN_TYPE=wireguard
-         - WIREGUARD_PRIVATE_KEY=ВАШ_ПРИВАТНЫЙ_КЛЮЧ_WIREGUARD
-         - WIREGUARD_ADDRESSES=10.0.0.2/32
-         - VPN_ENDPOINT_IP=IP_ВАШЕГО_VPN_СЕРВЕРА
-         - VPN_ENDPOINT_PORT=51820
-         - WIREGUARD_PUBLIC_KEY=ПУБЛИЧНЫЙ_КЛЮЧ_СЕРВЕРА
-         - FIREWALL_OUTBOUND_SUBNETS=192.168.89.0/24 # Доступ из локальной сети
-       restart: unless-stopped
-
      qbittorrent:
        image: lscr.io/linuxserver/qbittorrent:latest
        container_name: qbittorrent
-       network_mode: "service:gluetun"
-       depends_on:
-         - gluetun
+       ports:
+         - 8080:8080 # Веб-интерфейс qBittorrent
+         - 6881:6881
+         - 6881:6881/udp
        environment:
          - PUID=1000
          - PGID=1000
          - TZ=Europe/Moscow
          - WEBUI_PORT=8080
+         - TORRENTING_PORT=6881
        volumes:
          - ./qbittorrent:/config
          - ./torrents/temp:/temp # Буфер активных закачек на SSD
-         - /mnt/nas/media:/downloads # Готовые файлы на дисках TrueNAS
+         - /mnt/nas/media/downloads:/downloads # Готовые файлы на дисках TrueNAS
        restart: unless-stopped
    ```
 
-5. **Запустите контейнеры и узнайте временный пароль qBittorrent:**
+5. **Запустите контейнер и узнайте временный пароль qBittorrent:**
    ```bash
    docker compose up -d
    docker logs qbittorrent
