@@ -1,4 +1,4 @@
-# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v15)
+# Полное руководство по развертыванию домашнего сервера на базе Proxmox VE, TrueNAS и Ubuntu Server (v16)
 
 Данная инструкция составлена с учетом следующей конфигурации оборудования:
 * **Процессор:** Intel Core i5-14400 (10 ядер / 16 потоков, LGA 1700)
@@ -354,8 +354,8 @@
 
 4. **Подготовьте локальные каталоги на SSD для Docker-контейнеров и назначьте права для `UID=1001`:**
    ```bash
-   mkdir -p ~/docker/torrents/temp ~/docker/qbittorrent
-   sudo chown -R 1001:1001 ~/docker/qbittorrent ~/docker/torrents/temp
+   mkdir -p ~/docker/torrent/temp ~/docker/qbittorrent
+   sudo chown -R 1001:1001 ~/docker/qbittorrent ~/docker/torrent/temp
    cd ~/docker
    ```
 
@@ -363,7 +363,7 @@
    ```bash
    nano docker-compose.yml
    ```
-   Вставьте конфигурацию для запуска `qBittorrent` от имени изолированного пользователя `media_downloader` (`PUID=1001`, `PGID=1001`) с доступом исключительно к `/mnt/nas/media/download` (а также заготовку для будущего DLNA-сервера под `PUID=1002` с доступом только на чтение к `collection`):
+   Вставьте конфигурацию для запуска `qBittorrent` от имени изолированного пользователя `media_downloader` (`PUID=1001`, `PGID=1001`) с доступом исключительно к `/mnt/nas/media/download` (а также заготовку для будущего DLNA-сервера под `PUID=1002` с доступом только на чтение к `collection`). Для корректной работы с динамическим монтированием `x-systemd.automount` сетевые директории подключаются через `bind` с распространением монтирования `propagation: rshared`:
    ```yaml
    services:
      qbittorrent:
@@ -381,8 +381,12 @@
          - TORRENTING_PORT=6881
        volumes:
          - ./qbittorrent:/config
-         - ./torrents/temp:/temp # Буфер активных закачек на SSD
-         - /mnt/nas/media/download:/download # Готовые файлы в датасете download (UID 1001)
+         - ./torrent/temp:/temp # Буфер активных закачек на SSD
+         - type: bind
+           source: /mnt/nas/media/download
+           target: /download # Готовые файлы в датасете download (UID 1001)
+           bind:
+             propagation: rshared
        restart: unless-stopped
 
      # Заготовка для будущего DLNA-сервера (только чтение коллекции под UID 1002):
@@ -395,22 +399,27 @@
      #     - PGID=1002
      #     - TZ=Europe/Moscow
      #   volumes:
-     #     - /mnt/nas/media/collection:/media:ro # Доступ только к collection (Read-Only)
+     #     - type: bind
+     #       source: /mnt/nas/media/collection
+     #       target: /media
+     #       read_only: true # Доступ только к collection (Read-Only)
+     #       bind:
+     #         propagation: rshared
      #   restart: unless-stopped
    ```
 
 6. **Запустите контейнер, проверьте права доступа и узнайте временный пароль qBittorrent:**
    ```bash
    docker compose up -d
-   docker exec qbittorrent ls -la /download
+   docker exec -u 1001:1001 qbittorrent ls -la /download
    docker logs qbittorrent
    ```
-   *(Команда `docker exec qbittorrent ls -la /download` подтвердит, что контейнер от имени `UID=1001` видит сетевую папку без ошибок `Permission denied`).*
+   *(Примечание: проверять каталог `/download` внутри контейнера необходимо строго с флагом `-u 1001:1001`. По умолчанию `docker exec` запускается от имени `root` (`UID=0`), который из-за защиты NFS `Root Squash` преобразуется на сервере TrueNAS в анонимного пользователя `nobody` и получает ожидаемый отказ `Permission denied`, так как датасет защищен правами `770`).*
 
 7. **Настройте пути в веб-интерфейсе qBittorrent (`http://192.168.89.203:8080`):**
    * Откройте *Options* -> *Downloads*.
    * *Default Save Path:* `/download`
-   * Включите *Keep incomplete torrents in:* `/temp` (чтобы случайная запись кусков во время скачивания шла на быстрый SSD, а на жесткие диски TrueNAS переносился уже готовый файл).
+   * Включите *Keep incomplete torrent in:* `/temp` (чтобы случайная запись кусков во время скачивания шла на быстрый SSD, а на жесткие диски TrueNAS переносился уже готовый файл).
 
 ---
 
