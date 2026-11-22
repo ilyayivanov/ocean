@@ -382,7 +382,7 @@
        volumes:
          - ./qbittorrent:/config
          - ./torrents/temp:/temp # Буфер активных закачек на SSD
-         - /mnt/nas/media/download:/downloads # Готовые файлы в датасете download (UID 1001)
+         - /mnt/nas/media/download:/download # Готовые файлы в датасете download (UID 1001)
        restart: unless-stopped
 
      # Заготовка для будущего DLNA-сервера (только чтение коллекции под UID 1002):
@@ -402,14 +402,14 @@
 6. **Запустите контейнер, проверьте права доступа и узнайте временный пароль qBittorrent:**
    ```bash
    docker compose up -d
-   docker exec qbittorrent ls -la /downloads
+   docker exec qbittorrent ls -la /download
    docker logs qbittorrent
    ```
-   *(Команда `docker exec qbittorrent ls -la /downloads` подтвердит, что контейнер от имени `UID=1001` видит сетевую папку без ошибок `Permission denied`).*
+   *(Команда `docker exec qbittorrent ls -la /download` подтвердит, что контейнер от имени `UID=1001` видит сетевую папку без ошибок `Permission denied`).*
 
 7. **Настройте пути в веб-интерфейсе qBittorrent (`http://192.168.89.203:8080`):**
    * Откройте *Options* -> *Downloads*.
-   * *Default Save Path:* `/downloads`
+   * *Default Save Path:* `/download`
    * Включите *Keep incomplete torrents in:* `/temp` (чтобы случайная запись кусков во время скачивания шла на быстрый SSD, а на жесткие диски TrueNAS переносился уже готовый файл).
 
 ---
