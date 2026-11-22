@@ -48,3 +48,7 @@ Gigabyte B760M DS3H DDR4, Socket LGA 1700, Intel B760, mATX, Ret
 [Диалог настройка NAS на базе Ubuntu](https://share.google/aimode/JHbuOFHjP8UYKiPwN)
 
 [Диалог TrueNAS и Ubuntu под управлением Proxmox](https://share.google/aimode/qdTe41G0E5f4ZdWEY)
+
+# 9. Разграничение доступа
+
+[Диалог разграничение доступа](https://share.google/aimode/3veDLFkzW10wF4ZXk)
