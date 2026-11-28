@@ -134,7 +134,8 @@
 3. **Верните штатное авто-монтирование в режиме `ro` в Ubuntu:**
    ```bash
    sudo umount -l /mnt/nas/media/collection
-   sudo systemctl start mnt-nas-media-collection.automount
+   sudo systemctl daemon-reload
+   sudo systemctl start mnt-nas-media-collection.automount   
    ```
 
 4. **Обновите медиатеку в Jellyfin (`http://192.168.89.204:8096`):**
