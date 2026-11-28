@@ -80,7 +80,7 @@
 
 2. **Запустите копирование выбранной папки:**
    ```bash
-   rsync -ah --info=name1,progress2 --no-perms --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r /mnt/legacy_media/Путь_к_папке/ /mnt/nas/media/collection/Целевая_папка/
+   rsync -ah --info=progress2 --no-perms --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r /mnt/legacy_media/Путь_к_папке/ /mnt/nas/media/collection/Целевая_папка/
    ```
    **Что делают параметры команды:**
    * `--info=name1,progress2` — построчно выводит имена копируемых файлов, а в самой нижней строке терминала закрепляет общий прогресс в процентах, текущую скорость (МБ/с) и оставшееся время (`ETA`).
